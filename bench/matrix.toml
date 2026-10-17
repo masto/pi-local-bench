@@ -1,0 +1,55 @@
+# Benchmark matrix: each [[run]] is one configuration, executed `repeats` times.
+# `model` is a model id from the llama.cpp router (a file in ~/models or a
+# section in ../models.ini). `thinking` is pi's --thinking level; llama.cpp
+# models only distinguish "off" and "medium" (anything else is clamped).
+
+[defaults]
+task = "astro-blog"
+repeats = 2
+timeout_min = 30
+thinking = "medium"
+
+# --- Qwen3.6-35B-A3B: sampling presets
+[[run]]
+name = "qwen3.6 baseline"   # what the first interactive session used
+model = "qwen3.6-35b-baseline"
+
+[[run]]
+name = "qwen3.6 coding"     # Qwen's coding recommendation (daily default)
+model = "Qwen3.6-35B-A3B-UD-Q6_K_XL"
+
+[[run]]
+name = "qwen3.6 general"
+model = "qwen3.6-35b-general"
+
+[[run]]
+name = "qwen3.6 coding, no thinking"
+model = "Qwen3.6-35B-A3B-UD-Q6_K_XL"
+thinking = "off"
+
+# --- Qwen3.8-27B (dense, so slower: longer timeout)
+[[run]]
+name = "qwen3.8-27b"
+model = "Qwen3.8-27B-UD-Q6_K_XL"
+timeout_min = 45
+
+# --- Gemma 4 26B-A4B
+[[run]]
+name = "gemma4"
+model = "gemma-4-26B-A4B-it-UD-Q6_K_XL"
+
+[[run]]
+name = "gemma4, no thinking"
+model = "gemma-4-26B-A4B-it-UD-Q6_K_XL"
+thinking = "off"
+
+# --- Qwen3-Coder-Next (non-thinking model)
+[[run]]
+name = "coder-next"
+model = "Qwen3-Coder-Next-UD-IQ4_XS"
+thinking = "off"
+
+[[run]]
+name = "coder-next t0.6"
+model = "qwen3-coder-next-t0.6"
+thinking = "off"

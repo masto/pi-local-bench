@@ -1,0 +1,7 @@
+# Benchmark outputs (per-run workspaces, screenshots, transcripts, reviews)
+bench/results/
+# Created at runtime: the reviewer's empty working directory
+bench/.review-cwd/
+
+__pycache__/
+.DS_Store

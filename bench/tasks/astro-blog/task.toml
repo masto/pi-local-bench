@@ -1,0 +1,5 @@
+# The prompt is sent verbatim as the only user message, in an empty /workspace.
+prompt = "Create a static site for my personal blog using Astro and populate it with 4-5 sample posts."
+
+# Scorer, copied into the container only after the agent exits.
+check = "check.mjs"

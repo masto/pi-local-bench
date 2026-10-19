@@ -37,6 +37,7 @@ BENCH = Path(__file__).resolve().parent
 RESULTS = BENCH / "results"
 PI_VERSION = "1.3.0"
 IMAGE = f"pi-bench:{PI_VERSION}"
+BATTERIES_IMAGE = "pi-bench-batteries:1"
 SHOT_IMAGE = "pi-bench-shot:1"
 REVIEW_MODEL = "claude-opus-5-5"
 # The reviewer starts in this empty directory and gets the run folder via
@@ -44,10 +45,68 @@ REVIEW_MODEL = "claude-opus-5-5"
 # as project configuration.
 REVIEW_CWD = BENCH / ".review-cwd"
 
-# Everything pi would normally discover is disabled, including the built-in
-# llama.cpp extension: headless pi never refreshes that extension's catalog from
-# the server, so the model under test is declared in models.json instead.
-PI_ISOLATION = ["-ne", "--no-mcp", "-ns", "-nc", "-np", "--no-themes", "-na"]
+# Harness profiles. Context files, prompt templates, themes and MCP are always
+# off. "minimal" also disables every extension and skill (including the built-in
+# llama.cpp extension: headless pi never refreshes its catalog, so the model
+# under test is declared in models.json instead). "batteries" loads the packages
+# baked into its image (see batteries/Dockerfile). `secrets` maps environment
+# variables to macOS Keychain items; they're passed into the container by name
+# and scrubbed from the results.
+PROFILES = {
+    "minimal": dict(image=IMAGE, flags=["-ne", "--no-mcp", "-ns", "-nc", "-np", "--no-themes", "-na"], secrets={},
+                    tools="read, bash, edit and write only (no web or browser tools, though bash had network access)"),
+    # -a (trust the project): pi-lens refuses to install or spawn its language servers in an
+    # untrusted project, so with -na it silently reported "analysis unavailable" for every file.
+    # The workspace starts empty and the container is the sandbox, so trusting it is safe.
+    "batteries": dict(image=BATTERIES_IMAGE, flags=["--no-mcp", "-nc", "-np", "--no-themes", "-a"], secrets={},
+                      tools="read, bash, edit, write, grep, find, ls; web_search and fetch_content (pi-web-access); "
+                            "task tracking (pi-tasks); code diagnostics after edits (pi-lens); and a headless "
+                            "browser for snapshots and screenshots (agent-browser)"),
+}
+# Default bash timeout (pi has none; a never-exiting command blocks the session).
+# Batteries profiles copy it into ~/.pi/agent/extensions/ from 2026-10-18 on.
+PROFILES["batteries"]["extensions"] = [BENCH.parent / "pi-extensions" / "bash-default-timeout.ts"]
+# Same tools, plus profiles/guidance.md installed as ~/.pi/agent/APPEND_SYSTEM.md
+# (appended to pi's system prompt, as it would be for everyday use).
+PROFILES["batteries+agents"] = dict(PROFILES["batteries"], append_system=BENCH / "profiles" / "guidance.md",
+                                    tools=PROFILES["batteries"]["tools"] + "; plus general working-practices "
+                                          "guidance (verify versions, read docs, check results) in its system prompt")
+# Probe H2: batteries+agents without pi-lens (removed from the container's pi settings at run time).
+PROFILES["batteries+agents-nolens"] = dict(PROFILES["batteries+agents"], remove_packages=["npm:pi-lens@4.4.3"],
+                                           tools=PROFILES["batteries+agents"]["tools"].replace(
+                                               "code diagnostics after edits (pi-lens); ", ""))
+# Probe H3: the guidance with a firm "read the docs before first using a framework API" rule.
+PROFILES["batteries+docs"] = dict(PROFILES["batteries+agents"], append_system=BENCH / "profiles" / "guidance-docs.md",
+                                  tools=PROFILES["batteries"]["tools"] + "; plus working-practices guidance in its "
+                                        "system prompt that requires reading official docs before first using a framework API")
+# Round-1 winners combined (2026-10-18): firm docs guidance + bash timeout, without pi-lens
+# (false STOPs). Pair it with a thinking-capped model preset (e.g. *-budget4k).
+PROFILES["tuned"] = dict(PROFILES["batteries+docs"], remove_packages=["npm:pi-lens@4.4.3"],
+                         tools=PROFILES["batteries+docs"]["tools"].replace("code diagnostics after edits (pi-lens); ", ""))
+# Probe H6: tuned + a finish-line check (re-read the request, remove placeholder content).
+PROFILES["tuned+finish"] = dict(PROFILES["tuned"], append_system=BENCH / "profiles" / "guidance-finish.md",
+                                tools=PROFILES["tuned"]["tools"] + "; the guidance also asks for a final check "
+                                      "against the request and for leftover placeholder content")
+# H2 confirmation: tuned+finish with pi-lens kept (everything else identical).
+PROFILES["tuned+finish+lens"] = {k: v for k, v in PROFILES["tuned+finish"].items() if k != "remove_packages"}
+PROFILES["tuned+finish+lens"]["tools"] = PROFILES["tuned+finish"]["tools"].replace(
+    "task tracking (pi-tasks); ", "task tracking (pi-tasks); code diagnostics after edits (pi-lens); ")
+# Probe H7: tuned+finish with pi's built-in codemode tool (scripts that call other tools).
+PROFILES["tuned+finish+codemode"] = dict(PROFILES["tuned+finish"], add_default_tools=["+codemode"],
+                                         tools=PROFILES["tuned+finish"]["tools"] + "; and codemode (write JavaScript "
+                                               "that calls the other tools, e.g. several in parallel)")
+# Results from before the pi-lens trust fix (2026-10-18): pi-lens was installed but inactive.
+PROFILES["batteries-nolens"] = dict(PROFILES["batteries"], flags=PROFILES["batteries"]["flags"][:-1] + ["-na"])
+
+# Model providers. "local" is the llama.cpp router on the host, declared to pi in
+# the container's models.json (see pi_models_json). Others come from a pi
+# extension baked into the base image; `extension` is passed with -e so the
+# minimal profile (which disables extensions) can still use it.
+PROVIDERS = {
+    "local": dict(secrets={}),
+    "clinepass": dict(secrets={"CLINE_API_KEY": "cline-api"},
+                      extension="/home/node/.pi/agent/npm/node_modules/pi-clinepass-provider"),
+}
 PROVIDER = "local"
 
 
@@ -108,6 +167,33 @@ class Router:
 
 def docker(*args, **kw):
     return subprocess.run(["docker", *args], **kw)
+
+
+def load_secrets(names_to_items):
+    """Read secrets from the macOS Keychain; exits with a hint when one is missing."""
+    values = {}
+    for name, item in names_to_items.items():
+        r = subprocess.run(["security", "find-generic-password", "-s", item, "-w"], capture_output=True, text=True)
+        if r.returncode != 0 or not r.stdout.strip():
+            sys.exit(f"Keychain item '{item}' (for {name}) not found. Add it with:\n"
+                     f"  security add-generic-password -U -a \"$USER\" -s {item} -w \"$(pbpaste)\"")
+        values[name] = r.stdout.strip()
+    return values
+
+
+def scrub_secrets(out, secrets):
+    """Replace secret values in every file of a run's results (transcripts, workspace, ...)."""
+    hits = 0
+    for name, value in secrets.items():
+        needle, mask = value.encode(), f"[REDACTED {name}]".encode()
+        for p in out.rglob("*"):
+            if p.is_file() and not p.is_symlink() and p.stat().st_size < 64 << 20:
+                data = p.read_bytes()
+                if needle in data:
+                    p.write_bytes(data.replace(needle, mask))
+                    hits += 1
+    if hits:
+        log(f"  scrubbed secrets from {hits} file(s)")
 
 
 def read_json(path, default=None):
@@ -229,6 +315,8 @@ def clip(text, limit):
 
 def write_transcript(out):
     """A condensed, readable session log (for the reviewer and for humans)."""
+    if not (out / "events.jsonl").exists():
+        return  # raw events were deleted to save space; keep the existing transcript.md
     lines = []
     for ev in read_events(out / "events.jsonl"):
         msg = ev.get("message") or {}
@@ -266,11 +354,50 @@ def score_in_container(container, out, task):
         check = dict(score=0, max=100, error="checker produced no JSON", stdout=chk.stdout[-2000:])
     (out / "check.json").write_text(json.dumps(check, indent=2))
     checks = {c["id"]: c["points"] for c in check.get("checks", [])}
-    if check.get("projectDir") and checks.get("build"):
-        export_dir(container, check["projectDir"] + "/dist", out / "site")
+    # The site to screenshot: a checker can name it (e.g. a no-build game), else a successful build's dist/.
+    site = check.get("siteDir") or (check["projectDir"] + "/dist" if check.get("projectDir") and checks.get("build") else None)
+    if site:
+        export_dir(container, site, out / "site")
+        # Serve a checker-named entry page (e.g. tetris.html) as the site root, in our copy only.
+        entry = check.get("entry")
+        if entry and entry != "index.html" and (out / "site" / entry).is_file():
+            shutil.copyfile(out / "site" / entry, out / "site" / "index.html")
     elif (out / "site").exists():
         shutil.rmtree(out / "site")
     return update_result(out, score=check.get("score", 0), checks=checks)
+
+
+def play_check(out, task):
+    """Run a task's browser-played checks (in the screenshot image) and merge them into its score."""
+    if not task.get("browser_check"):
+        return read_json(out / "result.json", {})
+    check = read_json(out / "check.json", {})
+    check["checks"] = [c for c in check.get("checks", []) if not c.get("browser")]  # idempotent on reruns
+    shots = out / "shots"
+    shots.mkdir(exist_ok=True)
+    shots.chmod(0o777)
+    played = None
+    if (out / "site").is_dir():
+        r = docker("run", "--rm", "-v", f"{out / 'site'}:/site:ro", "-v", f"{shots}:/shots",
+                   "-v", f"{task['dir'] / task['browser_check']}:/opt/shot/play.mjs:ro", SHOT_IMAGE,
+                   "node", "/opt/shot/play.mjs", "/site", "/shots", capture_output=True, text=True, timeout=300)
+        try:
+            played = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            (out / "play-error.log").write_text(r.stdout + r.stderr)
+    if played:
+        check["checks"] += [{**c, "browser": True} for c in played["checks"]]
+        check.setdefault("info", {})["play"] = played.get("info")
+    else:
+        check["checks"].append(dict(id="playable", max=80, points=0, browser=True,
+                                    detail="no site to play" if not (out / "site").is_dir() else "play check failed"))
+    check["score"] = round(sum(c["points"] for c in check["checks"]), 1)
+    check["max"] = 100
+    (out / "check.json").write_text(json.dumps(check, indent=2))
+    page_shots = [s for s in (read_json(out / "result.json", {}).get("shots") or []) if not s.startswith("play-")]
+    play_shots = sorted(p.name for p in shots.glob("play-*.png"))
+    return update_result(out, score=check["score"], checks={c["id"]: c["points"] for c in check["checks"]},
+                         shots=(page_shots + play_shots) or None)
 
 
 def shoot(out):
@@ -327,10 +454,14 @@ REVIEW_SCHEMA = {
 }
 
 REVIEW_PROMPT = """\
-You are reviewing work by a local LLM coding agent (model: {model}, thinking: {thinking}). It was given \
+You are reviewing work by an LLM coding agent (model: {model}, thinking: {thinking}). It was given \
 exactly this request, in an empty directory, with no further input:
 
 > {prompt}
+
+Its harness provided these tools: {tools}. In process_notes, say whether it used the tools it had \
+effectively (for example, checking documentation or the rendered result) or guessed where it could have \
+checked.
 
 Everything is under {out} (read-only):
 - workspace/ - what it produced (node_modules removed)
@@ -344,9 +475,9 @@ strange or wrong, in particular:
 - outdated, mixed-version or invented APIs; code that can't work; dead code; leftover debug or scratch files;
 - in the transcript: false claims about the tooling, loops, abandoned approaches left behind, risky commands.
 
-Check the framework version in package.json and consult the official docs (WebFetch is allowed for \
-docs.astro.build) before calling an API missing, deprecated or non-standard; do not flag current official \
-APIs. Ignore visual design taste. Don't restate the automated checks except to explain the cause of a \
+If it uses a framework, check the installed version (package.json) and consult the official docs \
+(WebFetch is allowed for {docs}) before calling an API missing, deprecated or non-standard; do not flag \
+current official APIs. Ignore visual design taste. Don't restate the automated checks except to explain the cause of a \
 failure. Be specific (file paths, what's wrong, what the idiomatic version is) and concise.
 """
 
@@ -354,11 +485,14 @@ failure. Be specific (file paths, what's wrong, what the idiomatic version is) a
 def review(out):
     result = read_json(out / "result.json", {})
     task = load_task(result["task"])
-    prompt = REVIEW_PROMPT.format(model=result["model"], thinking=result["thinking"], prompt=task["prompt"], out=out)
+    tools = PROFILES.get(result.get("profile", "minimal"), PROFILES["batteries"])["tools"]
+    docs = task.get("review_docs", "docs.astro.build")
+    prompt = REVIEW_PROMPT.format(model=result["model"], thinking=result["thinking"], prompt=task["prompt"],
+                                  tools=tools, docs=docs, out=out)
     REVIEW_CWD.mkdir(exist_ok=True)
     cmd = ["claude", "-p", prompt, "--model", REVIEW_MODEL, "--output-format", "json",
            "--json-schema", json.dumps(REVIEW_SCHEMA), "--add-dir", str(out),
-           "--tools", "Read,Grep,Glob,WebFetch", "--allowedTools", "Read", "Grep", "Glob", "WebFetch(domain:docs.astro.build)",
+           "--tools", "Read,Grep,Glob,WebFetch", "--allowedTools", "Read", "Grep", "Glob", f"WebFetch(domain:{docs})",
            "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--setting-sources", ""]
     try:
         r = subprocess.run(cmd, cwd=REVIEW_CWD, capture_output=True, text=True, timeout=1800)
@@ -375,30 +509,61 @@ def review(out):
                                           findings=len(rev["findings"]), cost_usd=raw.get("total_cost_usd")))
 
 
-def run_one(router, cfg, task, rep, container_url):
+def run_one(router, cfg, task, rep, container_url, secrets):
+    profile = PROFILES[cfg["profile"]]
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     slug = "".join(c if c.isalnum() or c in ".-" else "-" for c in cfg["name"]).strip("-")
     out = RESULTS / f"{stamp}_{slug}_r{rep}"
     out.mkdir(parents=True)
     container = f"pi-bench-{stamp}-{rep}"
     timeout_s = int(cfg["timeout_min"] * 60)
-    props = router.props(cfg["model"])
-    gen = props.get("default_generation_settings", {})
-    models_json = pi_models_json(cfg["model"], props, container_url)
-    update_result(out, name=cfg["name"], model=cfg["model"], thinking=cfg["thinking"], task=cfg["task"], repeat=rep,
-                  started=datetime.now().isoformat(timespec="seconds"), pi_version=PI_VERSION,
-                  reasoning=models_json["providers"][PROVIDER]["models"][0]["reasoning"],
-                  server=dict(n_ctx=gen.get("n_ctx"), build=props.get("build_info"),
-                              sampling={k: gen.get("params", {}).get(k) for k in
-                                        ("temperature", "top_k", "top_p", "min_p", "presence_penalty", "repeat_penalty")}))
+    provider = PROVIDERS[cfg["provider"]]
+    update_result(out, name=cfg["name"], model=cfg["model"], provider=cfg["provider"], thinking=cfg["thinking"],
+                  task=cfg["task"], repeat=rep, profile=cfg["profile"],
+                  started=datetime.now().isoformat(timespec="seconds"), pi_version=PI_VERSION)
+    models_json = None
+    if cfg["provider"] == "local":
+        props = router.props(cfg["model"])
+        gen = props.get("default_generation_settings", {})
+        models_json = pi_models_json(cfg["model"], props, container_url)
+        update_result(out, reasoning=models_json["providers"][PROVIDER]["models"][0]["reasoning"],
+                      server=dict(n_ctx=gen.get("n_ctx"), build=props.get("build_info"),
+                                  sampling={k: gen.get("params", {}).get(k) for k in
+                                            ("temperature", "top_k", "top_p", "min_p", "presence_penalty", "repeat_penalty")}))
     log(f"▶ {cfg['name']} #{rep} → {out.relative_to(BENCH)}")
 
-    docker("run", "-d", "--rm", "--name", container, "--memory", "8g", IMAGE, check=True, stdout=subprocess.DEVNULL)
+    # Secrets go in by name (`-e NAME`) with values from docker's environment, so they never appear in argv.
+    run_secrets = {k: secrets[k] for k in {**profile["secrets"], **provider["secrets"]}}
+    env_flags = [f for k in run_secrets for f in ("-e", k)]
+    docker("run", "-d", "--rm", "--name", container, "--memory", "8g", "--shm-size", "1g", *env_flags,
+           profile["image"], check=True, stdout=subprocess.DEVNULL, env={**os.environ, **run_secrets})
     try:
-        docker("exec", "-i", container, "sh", "-c", "mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json",
-               input=json.dumps(models_json).encode(), check=True)
-        cmd = ["timeout", "-k", "30", str(timeout_s), "pi", "--mode", "json", "--provider", PROVIDER,
-               "--model", cfg["model"], "--thinking", cfg["thinking"], *PI_ISOLATION,
+        if models_json:
+            docker("exec", "-i", container, "sh", "-c", "mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json",
+                   input=json.dumps(models_json).encode(), check=True)
+        if profile.get("append_system"):
+            docker("exec", "-i", container, "sh", "-c", "mkdir -p ~/.pi/agent && cat > ~/.pi/agent/APPEND_SYSTEM.md",
+                   input=profile["append_system"].read_bytes(), check=True)
+        for ext in profile.get("extensions", []):
+            docker("exec", "-i", container, "sh", "-c",
+                   f"mkdir -p ~/.pi/agent/extensions && cat > ~/.pi/agent/extensions/{ext.name}",
+                   input=ext.read_bytes(), check=True)
+        if profile.get("add_default_tools"):
+            add = json.dumps(profile["add_default_tools"])
+            docker("exec", container, "node", "-e",
+                   "const f=process.env.HOME+'/.pi/agent/settings.json',fs=require('fs'),s=JSON.parse(fs.readFileSync(f));"
+                   f"s.defaultTools=[...(s.defaultTools||[]),...{add}];fs.writeFileSync(f,JSON.stringify(s,null,2))",
+                   check=True)
+        if profile.get("remove_packages"):
+            drop = json.dumps(profile["remove_packages"])
+            docker("exec", container, "node", "-e",
+                   "const f=process.env.HOME+'/.pi/agent/settings.json',fs=require('fs'),s=JSON.parse(fs.readFileSync(f));"
+                   f"s.packages=(s.packages||[]).filter(p=>!{drop}.includes(p));fs.writeFileSync(f,JSON.stringify(s,null,2))",
+                   check=True)
+        extension = ["-e", provider["extension"]] if provider.get("extension") else []
+        cmd = ["timeout", "-k", "30", str(timeout_s), "pi", "--mode", "json",
+               "--provider", PROVIDER if cfg["provider"] == "local" else cfg["provider"],
+               "--model", cfg["model"], "--thinking", cfg["thinking"], *profile["flags"], *extension,
                "--session-dir", "/home/node/sessions", "--", task["prompt"]]
         t0 = time.time()
         with open(out / "events.jsonl", "wb") as ev, open(out / "pi-stderr.log", "wb") as err:
@@ -420,9 +585,13 @@ def run_one(router, cfg, task, rep, container_url):
     finally:
         docker("rm", "-f", container, capture_output=True)
 
+    scrub_secrets(out, run_secrets)
     write_transcript(out)
     log("  screenshots")
     shoot(out)
+    if task.get("browser_check"):
+        log("  playing")
+        play_check(out, task)
     result = update_result(out, **summarize_events(out / "events.jsonl"))
     log(f"  score {result['score']}/100, {result['turns']} turns, {result['tool_calls']} tool calls "
         f"({result['tool_errors']} errors), {result['output_tokens']} output tokens"
@@ -449,7 +618,8 @@ def rescore(out):
 def preflight():
     if docker("info", capture_output=True).returncode != 0:
         sys.exit("Docker isn't running (start Docker Desktop).")
-    for image, context in ((IMAGE, BENCH), (SHOT_IMAGE, BENCH / "shot")):
+    # Order matters: the batteries image builds on the base image.
+    for image, context in ((IMAGE, BENCH), (SHOT_IMAGE, BENCH / "shot"), (BATTERIES_IMAGE, BENCH / "batteries")):
         if docker("image", "inspect", image, capture_output=True).returncode != 0:
             log(f"building {image}")
             docker("build", "-t", image, "--build-arg", f"PI_VERSION={PI_VERSION}", str(context), check=True)
@@ -484,16 +654,24 @@ def cmd_run(args):
             r["task"] = args.task
     if not runs:
         sys.exit("No runs selected.")
+    for key, known in (("profile", PROFILES), ("provider", PROVIDERS)):
+        unknown = sorted({r.get(key) for r in runs} - known.keys())
+        if unknown:
+            sys.exit(f"Unknown {key}(s) {unknown}; known: {sorted(known)}")
+    secrets = load_secrets({k: v for r in runs
+                            for k, v in {**PROFILES[r["profile"]]["secrets"], **PROVIDERS[r["provider"]]["secrets"]}.items()})
 
     preflight()
     router = Router(args.router)
-    try:
-        available = router.models()
-    except OSError as e:
-        sys.exit(f"Can't reach the llama.cpp router at {router.url} ({e}). Start ../start-llama-router.sh.")
-    missing = sorted({r["model"] for r in runs} - available.keys())
-    if missing:
-        sys.exit(f"Router doesn't list {missing}. Restart it so it rereads ../models.ini and ~/models.")
+    local_models = {r["model"] for r in runs if r["provider"] == "local"}
+    if local_models:
+        try:
+            available = router.models()
+        except OSError as e:
+            sys.exit(f"Can't reach the llama.cpp router at {router.url} ({e}). Start ../start-llama-router.sh.")
+        missing = sorted(local_models - available.keys())
+        if missing:
+            sys.exit(f"Router doesn't list {missing}. Restart it so it rereads ../models.ini and ~/models.")
     container_url = args.router.replace("127.0.0.1", "host.docker.internal").replace("localhost", "host.docker.internal")
 
     total = sum(r["repeats"] for r in runs)
@@ -504,12 +682,18 @@ def cmd_run(args):
         reviews = []
         for cfg in runs:
             task = load_task(cfg["task"])
-            router.ensure_only(cfg["model"])
+            if cfg["provider"] == "local":
+                try:
+                    router.ensure_only(cfg["model"])
+                except Exception as e:  # e.g. out of memory: skip this config, keep the batch going
+                    log(f"  couldn't load {cfg['model']}: {e!r}; skipping {cfg['name']}")
+                    done += cfg["repeats"]
+                    continue
             for rep in range(1, cfg["repeats"] + 1):
                 done += 1
                 log(f"[{done}/{total}]")
                 try:
-                    out = run_one(router, cfg, task, rep, container_url)
+                    out = run_one(router, cfg, task, rep, container_url, secrets)
                     if not args.no_review:
                         reviews.append(start_review(pool, out))
                 except Exception as e:  # keep going; one broken run shouldn't sink an overnight batch
@@ -536,6 +720,10 @@ def cmd_stage(args):
         if args.cmd in ("rescore", "shots"):
             r = shoot(out)
             log(f"{out.name}: shots {'ok' if r.get('shots') else 'none'}")
+            task = load_task(r["task"])
+            if task.get("browser_check"):  # shoot() cleared the play screenshots; replay
+                r = play_check(out, task)
+                log(f"{out.name}: played, {r['score']}/100")
         write_transcript(out)
 
 
@@ -558,13 +746,13 @@ def cmd_report(args):
         groups.setdefault((r["task"], r["name"]), []).append(r)
     order = sorted(groups.items(), key=lambda kv: -mean([r["score"] for r in kv[1]]))
 
-    lines = ["| task | config | n | score | min–max | posts render | review | broken links | contrast fails | minutes | turns | tool err |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| task | config | profile | n | score | min–max | posts render | review | broken links | contrast fails | minutes | turns | tool err |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for (task, name), rs in order:
         scores = [r["score"] for r in rs]
         verdicts = [r["review"]["verdict"] for r in rs if r.get("review")]
         lines.append(
-            f"| {task} | {name} | {len(rs)} | **{mean(scores):.0f}** | {min(scores):.0f}–{max(scores):.0f} "
+            f"| {task} | {name} | {rs[0].get('profile', 'minimal')} | {len(rs)} | **{mean(scores):.0f}** | {min(scores):.0f}–{max(scores):.0f} "
             f"| {sum(r.get('checks', {}).get('post_rendered', 0) > 0 for r in rs)}/{len(rs)} "
             f"| {', '.join(sorted(set(verdicts))) or '–'} "
             f"| {fmt(mean([r.get('broken_links') for r in rs]), '.1f')} "
@@ -624,7 +812,8 @@ def write_gallery(order):
              f"<h1>Benchmark gallery</h1><p class=muted>Generated {datetime.now():%Y-%m-%d %H:%M}. "
              f"Configs sorted by mean score; click a screenshot for full size.</p>"]
     for (task, name), rs in order:
-        parts.append(f"<h2>{e(name)} <span class=muted>· {e(task)} · mean {mean([r['score'] for r in rs]):.0f}</span></h2>")
+        parts.append(f"<h2>{e(name)} <span class=muted>· {e(task)} · {e(rs[0].get('profile', 'minimal'))} profile"
+                     f" · mean {mean([r['score'] for r in rs]):.0f}</span></h2>")
         for r in sorted(rs, key=lambda r: r["dir"]):
             d = r["dir"]
             rev = read_json(RESULTS / d / "review.json")
@@ -636,7 +825,8 @@ def write_gallery(order):
             shots = r.get("shots") or []
             if shots:
                 parts.append("<div class=shots>")
-                for f, cap in (("home-desktop.png", "home"), ("post-desktop.png", "post"), ("home-mobile.png", "phone")):
+                second = ("play-later.png", "after playing") if "play-later.png" in shots else ("post-desktop.png", "post")
+                for f, cap in (("home-desktop.png", "home"), second, ("home-mobile.png", "phone")):
                     if f in shots:
                         parts.append(f"<a href='{d}/shots/{f}'><img loading=lazy src='{d}/shots/{f}' alt='{cap}'>"
                                      f"<div class=cap>{cap}</div></a>")
@@ -652,6 +842,9 @@ def write_gallery(order):
                 f"broken links <b>{fmt(r.get('broken_links'))}</b> · contrast failures <b>{fmt(r.get('contrast_failures'))}</b>"
                 + (f" · failed checks: <b>{e(', '.join(failed))}</b>" if failed else "")
                 + (" · <b>timed out</b>" if r.get("timed_out") else "") + "</div>")
+            tools = sorted((r.get("tools") or {}).items(), key=lambda kv: -kv[1])
+            if tools:
+                parts.append("<div class=facts>tools: " + ", ".join(f"{e(str(k))} <b>{v}</b>" for k, v in tools) + "</div>")
             if rev:
                 parts.append(f"<p>{e(rev['summary'])}</p>")
                 def finding_list(fs):

@@ -1,5 +1,5 @@
 # Benchmark matrix: each [[run]] is one configuration, executed `repeats` times.
-# `model` is a model id from the llama.cpp router (a file in ~/models or a
+# `model` is a model id from the llama.cpp router (a file in $MODELS_DIR or a
 # section in ../models.ini). `thinking` is pi's --thinking level; llama.cpp
 # models only distinguish "off" and "medium" (anything else is clamped).
 
@@ -8,10 +8,12 @@ task = "astro-blog"
 repeats = 2
 timeout_min = 30
 thinking = "medium"
+profile = "minimal"   # or "batteries": web search, browser, diagnostics, tasks (see bench.py PROFILES)
+provider = "local"    # or "clinepass" (model ids like "cline-pass/kimi-k3"; see `pi --list-models clinepass`)
 
 # --- Qwen3.6-35B-A3B: sampling presets
 [[run]]
-name = "qwen3.6 baseline"   # what the first interactive session used
+name = "qwen3.6 baseline"   # control: GGUF defaults, 64K context
 model = "qwen3.6-35b-baseline"
 
 [[run]]
@@ -53,3 +55,252 @@ thinking = "off"
 name = "coder-next t0.6"
 model = "qwen3-coder-next-t0.6"
 thinking = "off"
+
+# ============ Batteries profile: same task and scoring, Claude-Code-like tools ============
+# Run just these with: ./bench.py run --only batteries
+
+[[run]]
+name = "qwen3.6 coding +batteries"
+model = "Qwen3.6-35B-A3B-UD-Q6_K_XL"
+profile = "batteries"
+
+[[run]]
+name = "qwen3.6 general +batteries"
+model = "qwen3.6-35b-general"
+profile = "batteries"
+
+[[run]]
+name = "qwen3.8-27b +batteries"
+model = "Qwen3.8-27B-UD-Q6_K_XL"
+profile = "batteries"
+timeout_min = 45
+
+[[run]]
+name = "gemma4 +batteries"
+model = "gemma-4-26B-A4B-it-UD-Q6_K_XL"
+profile = "batteries"
+
+[[run]]
+name = "coder-next t0.6 +batteries"
+model = "qwen3-coder-next-t0.6"
+thinking = "off"
+profile = "batteries"
+
+# ============ ClinePass cloud models: same task and scoring, both profiles ============
+# Run just these with: ./bench.py run --only clinepass   (needs a ClinePass account; uses its quota)
+
+[[run]]
+name = "kimi-k3 (clinepass)"
+provider = "clinepass"
+model = "cline-pass/kimi-k3"
+
+[[run]]
+name = "kimi-k3 (clinepass) +batteries"
+provider = "clinepass"
+model = "cline-pass/kimi-k3"
+profile = "batteries"
+
+[[run]]
+name = "glm-5.3 (clinepass)"
+provider = "clinepass"
+model = "cline-pass/glm-5.3"
+
+[[run]]
+name = "glm-5.3 (clinepass) +batteries"
+provider = "clinepass"
+model = "cline-pass/glm-5.3"
+profile = "batteries"
+
+[[run]]
+name = "deepseek-v4-pro (clinepass)"
+provider = "clinepass"
+model = "cline-pass/deepseek-v4-pro"
+
+[[run]]
+name = "deepseek-v4-pro (clinepass) +batteries"
+provider = "clinepass"
+model = "cline-pass/deepseek-v4-pro"
+profile = "batteries"
+
+[[run]]
+name = "qwen3.8-max (clinepass)"
+provider = "clinepass"
+model = "cline-pass/qwen3.8-max"
+
+[[run]]
+name = "qwen3.8-max (clinepass) +batteries"
+provider = "clinepass"
+model = "cline-pass/qwen3.8-max"
+profile = "batteries"
+
+# ============ Environment tuning: Qwen3.8-27B (2026-10-18) ============
+# batteries now has pi-lens working (project trust fix); batteries+agents adds
+# profiles/guidance.md as APPEND_SYSTEM.md. Run with: ./bench.py run --only "qwen3.8-27b ·"
+# Earlier results are archived in archive/2026-10-17-model-survey/ (open its gallery.html).
+
+[[run]]
+name = "qwen3.8-27b · minimal · astro"
+model = "Qwen3.8-27B-UD-Q6_K_XL"
+repeats = 3
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · batteries · astro"
+model = "Qwen3.8-27B-UD-Q6_K_XL"
+profile = "batteries"
+repeats = 3
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · batteries+agents · astro"
+model = "Qwen3.8-27B-UD-Q6_K_XL"
+profile = "batteries+agents"
+repeats = 3
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · minimal · tetris"
+model = "Qwen3.8-27B-UD-Q6_K_XL"
+task = "tetris"
+repeats = 3
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · batteries · tetris"
+model = "Qwen3.8-27B-UD-Q6_K_XL"
+task = "tetris"
+profile = "batteries"
+repeats = 3
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · batteries+agents · tetris"
+model = "Qwen3.8-27B-UD-Q6_K_XL"
+task = "tetris"
+profile = "batteries+agents"
+repeats = 3
+timeout_min = 45
+
+# ============ Probe: thinking control on Tetris (2026-10-18) ============
+# Uncapped Qwen3.8 thinking spent whole runs planning without a tool call.
+# Run with: ./bench.py run --only "think-budget,no-think"
+
+[[run]]
+name = "qwen3.8-27b · batteries+agents · tetris · think-budget-8k"
+model = "qwen3.8-27b-budget"
+task = "tetris"
+profile = "batteries+agents"
+repeats = 1
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · batteries+agents · tetris · no-think"
+model = "qwen3.8-27b-instruct"
+task = "tetris"
+profile = "batteries+agents"
+thinking = "off"
+repeats = 1
+timeout_min = 45
+
+# ============ Probes, round 1 (2026-10-18): one run each vs batteries+agents ============
+# H1 4K thinking cap, H2 no pi-lens, H3 firm docs rule. All batteries profiles now
+# include the default bash timeout. Run with: ./bench.py run --only "probe1"
+
+[[run]]
+name = "qwen3.8-27b · batteries+agents · astro · think-budget-4k · probe1"
+model = "qwen3.8-27b-budget4k"
+profile = "batteries+agents"
+repeats = 1
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · batteries+agents · tetris · think-budget-4k · probe1"
+model = "qwen3.8-27b-budget4k"
+task = "tetris"
+profile = "batteries+agents"
+repeats = 1
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · batteries+agents-nolens · astro · probe1"
+model = "Qwen3.8-27B-UD-Q6_K_XL"
+profile = "batteries+agents-nolens"
+repeats = 1
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · batteries+docs · astro · probe1"
+model = "Qwen3.8-27B-UD-Q6_K_XL"
+profile = "batteries+docs"
+repeats = 1
+timeout_min = 45
+
+# ============ Probes, round 2 (2026-10-18): one run each ============
+# tuned = firm docs guidance + bash timeout, no pi-lens; models capped at 4K thinking.
+# H4: tuned Qwen3.6 (fast MoE). H6: finish-line check on Qwen3.8.
+# Run with: ./bench.py run --only "probe2"
+
+[[run]]
+name = "qwen3.6 · tuned · astro · probe2"
+model = "qwen3.6-35b-budget4k"
+profile = "tuned"
+repeats = 1
+
+[[run]]
+name = "qwen3.6 · tuned · tetris · probe2"
+model = "qwen3.6-35b-budget4k"
+task = "tetris"
+profile = "tuned"
+repeats = 1
+
+[[run]]
+name = "qwen3.8-27b · tuned+finish · astro · probe2"
+model = "qwen3.8-27b-budget4k-mtp"
+profile = "tuned+finish"
+repeats = 1
+timeout_min = 45
+
+# ============ Probe H7 (2026-10-18): codemode on top of the best config ============
+# Run with: ./bench.py run --only "probe3"
+
+[[run]]
+name = "qwen3.8-27b · tuned+finish+codemode · astro · probe3"
+model = "qwen3.8-27b-budget4k-mtp"
+profile = "tuned+finish+codemode"
+repeats = 1
+timeout_min = 45
+
+# ============ Overnight confirmation (2026-10-18) ============
+# Best config so far (tuned+finish: docs + finish-line guidance, bash timeout, no pi-lens;
+# Qwen3.8 with 4K thinking cap + MTP) vs the same with pi-lens, both tasks, 3 repeats.
+# Run with: ./bench.py run --only "· final ·"
+
+[[run]]
+name = "qwen3.8-27b · final · tuned+finish · astro"
+model = "qwen3.8-27b-budget4k-mtp"
+profile = "tuned+finish"
+repeats = 3
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · final · tuned+finish+lens · astro"
+model = "qwen3.8-27b-budget4k-mtp"
+profile = "tuned+finish+lens"
+repeats = 3
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · final · tuned+finish · tetris"
+model = "qwen3.8-27b-budget4k-mtp"
+task = "tetris"
+profile = "tuned+finish"
+repeats = 3
+timeout_min = 45
+
+[[run]]
+name = "qwen3.8-27b · final · tuned+finish+lens · tetris"
+model = "qwen3.8-27b-budget4k-mtp"
+task = "tetris"
+profile = "tuned+finish+lens"
+repeats = 3
+timeout_min = 45

@@ -37,6 +37,11 @@ you want different sampling for thinking on vs. off; we haven't needed it.)
 | `gemma-4-26B-A4B-it-UD-Q6_K_XL` | 22G | temp 1.0, top-p 0.95, top-k 64, min-p 0 | 128K | configurable | Google card: "same for all use cases" |
 | `Qwen3-Coder-Next-UD-IQ4_XS` | 38G | temp 1.0, top-p 0.95, top-k 40, min-p 0 | 128K | none (non-thinking model) | Qwen card |
 | `qwen3-coder-next-t0.6` | same file | as above, temp 0.6 | 128K | none | Our variant, to separate model vs. temperature |
+| `qwen3.8-27b-budget4k-mtp` | 25G + 2G draft | as `Qwen3.8-27B-UD-Q6_K_XL` | 128K | on, capped at 4K tokens per response | **Recommended default; loaded at startup.** Thinking cap plus MTP speculative decoding (about 2× generation speed). Best configuration in the benchmark |
+| `qwen3.8-27b-budget4k` | same file | as `Qwen3.8-27B-UD-Q6_K_XL` | 128K | on, capped at 4K | The same without MTP |
+| `qwen3.8-27b-budget` | same file | as `Qwen3.8-27B-UD-Q6_K_XL` | 128K | on, capped at 8K | Earlier, looser cap |
+| `qwen3.8-27b-instruct` | same file | temp 0.7, top-p 0.80, top-k 20, min-p 0, presence 1.5 | 128K | use with `/thinking off` | Qwen card: "instruct (non-thinking) mode" |
+| `qwen3.6-35b-budget4k` | same file as Qwen3.6 | as `Qwen3.6-35B-A3B-UD-Q6_K_XL` | 128K | on, capped at 4K | Qwen3.6 coding preset with the 4K cap |
 
 Notes:
 
@@ -49,6 +54,16 @@ Notes:
 - **Thinking in pi.** For llama.cpp models pi only distinguishes `off` and
   `medium`; other levels are clamped. Thinking helps planning but costs time;
   the benchmark measures both.
+- **Thinking cap.** Uncapped, Qwen3.8-27B sometimes spends a whole turn
+  planning without calling a tool. `reasoning-budget` caps thinking per
+  response; when it runs out, llama.cpp injects `reasoning-budget-message` and
+  closes the thinking block, so the model has to act.
+- **MTP.** Qwen3.8 ships a small multi-token-prediction head that drafts
+  tokens for the main model to verify (`spec-type = draft-mtp`). The output
+  distribution is unchanged; generation went from ~22 to ~46 tok/s on an M2
+  Ultra. The draft file lives in `models-aux/` next to the models folder, so
+  the router doesn't list it as a chat model. Compare presets with
+  `bench/speedtest.py`.
 - **Memory.** Sized for a 64 GB Apple Silicon Mac, one model at a time.
   Qwen3-Coder-Next (~38G + KV) is the largest; it stays under macOS's default
   GPU limit (~75% of RAM, ~48G), so no `sysctl iogpu.wired_limit_mb` change is

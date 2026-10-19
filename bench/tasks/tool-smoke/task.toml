@@ -1,0 +1,6 @@
+# Harness check for the batteries profile (web search + browser), a few minutes:
+#   ./bench.py run --task tool-smoke --only "coder-next t0.6 +batteries" -n 1 --no-review
+prompt = """Two steps:
+1. Use web search to find the official Astro documentation page about the content collections glob() loader, and write just its URL into docs.txt.
+2. Create site/index.html containing <h1>Probe page</h1>, serve the site directory on port 8000 in the background, open http://127.0.0.1:8000/ with your browser tools, and write the h1 text you see in the browser into seen.txt."""
+check = "check.mjs"

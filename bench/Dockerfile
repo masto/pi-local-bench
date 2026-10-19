@@ -19,4 +19,9 @@ RUN mkdir -p /workspace /home/node/sessions && chown node:node /workspace /home/
 
 USER node
 WORKDIR /workspace
+
+# ClinePass provider for cloud-model runs. Loaded only when a run uses it: the
+# minimal profile disables extensions and bench.py adds it back with -e.
+RUN pi install npm:pi-clinepass-provider@1.6.0
+
 CMD ["sleep", "infinity"]

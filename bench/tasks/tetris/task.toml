@@ -1,0 +1,9 @@
+# A task without framework-version pitfalls: stable web APIs only, but a real
+# feedback loop (the game has to actually play). Scored in two parts: check.mjs
+# (static, 20 points) in the agent's container, then play.mjs (80 points) in the
+# screenshot container, which loads the game headlessly, watches for gravity and
+# presses keys.
+prompt = "Create a playable Tetris game that runs in the web browser, using only plain HTML, CSS and JavaScript (no frameworks, libraries or build step)."
+check = "check.mjs"
+browser_check = "play.mjs"
+review_docs = "developer.mozilla.org"
